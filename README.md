@@ -1,32 +1,142 @@
 # broadlink-dissector
-Wireshark LUA dissector for Broadlink protocol
+A Wireshark Lua dissector for the Broadlink Smart Home Protocol, that UDP traffic between a client and BroadLink devices. 
 
-## Background
-Everything has started with an RGBW Light bulb from Aliexpress. I configured the bulbs with their software and started using them, but since I alread had some sort of Home Assistant setup for few gadgets, I decided to search for other capabilities. Unfortunately these bulbs have never been mentioned anywhere else though.
-It was fairly easy to figure out, the bulbs are using Broadlink protocol to communicate.
+The repo is (only) partially based on [csabavirag/broadlink-dissector](https://github.com/csabavirag/broadlink-dissector).
 
-Then I found [broadlink-mqtt](https://github.com/eschava/broadlink-mqtt), a nice library which supports couple of Broadlink devices, but mine. Thanks to [the blog](https://blog.ipsumdomus.com/broadlink-smart-home-devices-complete-protocol-hack-bc0b4b397af1) and its very decent details of the protocol, I decided to write a Wireshark "plugin", so called dissector to see what kind of communication travels between my bulbs and the controller app in the hope to be able extend the broadlink-mqtt library to support my bulbs. And having them integrated with Home Assistant.
-
-Wireshark supports dissectors written in C or in LUA languages. For me, LUA seemed to be easier to achieve the goal.
 
 ## Pre-requisites
-Since the Broadlink protol is based on AES128-CBC encryption, we need some kind of crypto library support. I chose [luagcrypt](https://github.com/Lekensteyn/luagcrypt). To install this library I followed these steps (please note, my development was done on macOS, but the principles are the same for Windows platform too)
+1. [Wireshark](https://www.wireshark.org/download.html) 4.6.0 (or newer), as this natively supports GcryptCipher.
 
-1. Wireshark requires **Lua 5.2**. By default I installed the most recent version from their website and unfortunately I received errors later and Wireshark was not able to load the library properly. So I followed the wiki page [Install Lua 5.2 on Mac](https://github.com/nubix-io/stuart/wiki/Install-Lua-5.2-on-a-Mac)
-2. Then I added **Luarocks**
-   1. Downloaded from https://luarocks.org/releases/luarocks-3.2.1.tar.gz
-   1. After extraction, I run the command to install `./configure && make && make install`
-3. I installed **libgcrypt** library via brew (`brew install libgcrypt`) which is the depencency of **luagcrypt**
-4. And finally cloned the [luagcrypt](https://github.com/Lekensteyn/luagcrypt) library to complile
-5. After the successful luagcrypt library test, I just had to move the luagcrypt.so file to /usr/local/lib/lua/5.2/
+## Installation
 
-## Install
-And just copied the dissector to `~/.local/lib/wireshark/plugins/broadlink.lua` on the Mac
+Copy the plugin to your Wireshark plugins folder:
+
+**macOS / Linux**
+```bash
+cp broadlink_dissector.lua ~/.config/wireshark/plugins/
+```
+
+**Windows**
+```
+copy broadlink_dissector.lua %APPDATA%\Wireshark\plugins\
+```
+
+Then reload plugins — no restart needed:
+
+> **Wireshark → Analyze → Reload Lua Plugins** (`Ctrl+Shift+L`)
+
+---
+
+## Syntax Check
+
+Validate the file before loading it:
+
+```bash
+luac -p broadlink_dissector.lua && echo "OK"
+```
+
+---
+
+## Usage
+
+The dissector registers itself on **UDP ports 80 and 8899**.  
+Broadlink devices use port 80 for discovery broadcasts and typically port 8899 for commands.
+
+To force decoding on a different port:
+
+> Right-click a packet → **Decode As** → select `broadlink`
+
+### Display filter examples
+
+```wireshark
+# All Broadlink traffic
+broadlink
+
+# Only auth / pairing packets
+broadlink.command == 0x0065
+
+# Only IR/RF command packets
+broadlink.command == 0x006a
+
+# Specific device type (RM5 Pro)
+broadlink.device_type == 0x5224
+
+# Response packets with errors
+broadlink.error_code != 0
+
+# Filter by MAC address
+broadlink.mac == aa:a8:1a:89:8e:34
+```
+
+---
+
+## Decoded fields
+
+| Field | Filter key | Notes |
+|---|---|---|
+| Magic bytes | `broadlink.magic` | `5a a5 aa 55 5a a5 aa 55` |
+| Checksum | `broadlink.checksum` | Seed `0xbeaf`, over entire packet |
+| Error code | `broadlink.error_code` | Non-zero in response errors only |
+| Device type | `broadlink.device_type` | See device table below |
+| Command code | `broadlink.command` | See command table below |
+| Packet counter | `broadlink.packet_count` | Increments per session |
+| MAC address | `broadlink.mac` | Reversed in controller→device packets |
+| Device ID | `broadlink.device_id` | `0x00000000` = unpaired / pre-auth |
+| Payload checksum | `broadlink.payload_checksum` | Seed `0xbeaf`, over unencrypted payload |
+| Encrypted payload | `broadlink.payload` | AES-128-CBC |
+| Device IP | `broadlink.device_ip` | Discovery response only |
+| Device MAC | `broadlink.device_mac` | Discovery response only |
+| Device name | `broadlink.device_name` | Discovery response only |
+
+---
+
+## Command codes
+
+| Code | Description |
+|---|---|
+| `0x0001` | Discovery request |
+| `0x0007` | Discovery response |
+| `0x0065` | Authorization / device status |
+| `0x0066` | SP1 set power state |
+| `0x006a` | Send IR/RF command, learning mode, read data |
+| `0x001a` | Query RF data |
+
+---
+
+## 0x006a sub-command hints
+
+For `0x006a` packets the dissector reads the first 3 bytes of the encrypted payload as a hint and annotates the payload field. Because the payload is AES-encrypted on the wire, this is a best-effort annotation based on the ciphertext bytes; it is accurate when the default key is still in use (pre-auth).
+
+| Prefix bytes | Meaning |
+|---|---|
+| `02 …` | Send IR/RF (RM2/RM3 standard) |
+| `03 …` | Enter IR learning (RM2/RM3) |
+| `04 …` | Check captured IR data (RM3 standard) |
+| `04 00 03` | Enter IR learning (RM4 / Red Bean) |
+| `04 00 04` | Check captured IR / RF data (RM4) |
+| `04 00 19` | Enter RF sweep (RM4 Pro) |
+| `04 00 1a` | Check RF frequency (RM4 Pro) |
+| `04 00 1b` | Read captured RF data (RM4 Pro) |
+| `04 00 1e` | Cancel RF sweep (RM4 Pro) |
+| `d0 00 02` | Send IR/RF (RM3 Red Bean / RM4 Mini) |
+| `da 00 02` | Send IR/RF (RM4 Pro) |
+| `00 00 24` | Check temperature / humidity (RM4 Pro) |
+| `19 …` | Enter RF sweep (RM3) |
+| `1a …` | Check RF frequency (RM3) |
+| `1b …` | Read captured RF data (RM3) |
+| `1e …` | Cancel RF sweep (RM3) |
+| `01 …` | Read device status |
+| `0a …` | MP1: check power state |
+| `0d …` | MP1: set port power state |
+| `09 …` | Dooya: set curtain state |
+
+---
 
 ## Usage
 If everything went well, Wireshark will show the new plugin/dissector registered under About->Plugins
 
 ### Ready to capture the communication.
+Broadcasts (of hello) packets are easy to sniff out and don't require the options listed below.
 
 _**Option 1**_: I have a DD-WRT router, so it was easy to install **tcpdump** on it and use the router for remote capture. The router is the central place where the traffic goes throuh, so it will "see" the whole communication.
 
@@ -38,6 +148,10 @@ So I just executed
 _**Option 2**_: From a rooted Android device, where the tcpdump is also available and can run the vendor's management application
 
 `adb shell su -c tcpdump -i any -s0 -w - "host 192.168.1.100" | /Applications/Wireshark.app/Contents/MacOS/Wireshark -k -i -`
+
+_**Option 3**_: Use a phone or tablet app on your dev machine (e.g. running the [iPad BroadLink-app](https://apps.apple.com/nl/app/broadlink/id1450257910) on macOS).
+
+
 
 ### Analyze the captured packets and use the dissector
 
@@ -58,7 +172,7 @@ And see the response in the next packet
 ![image](https://user-images.githubusercontent.com/10976654/72676530-76bdae00-3a92-11ea-9f30-9f4e08231827.png)
 
 
-## Conclusion
+<!-- ## Conclusion
 I have no other types of Broadlink device (such as RM2*, A1 etc), only these bulbs (devID: 0x60C8) so could not verify if the dissector works properly with other models, but I believe the plugin can be easily extended/modified for others.
 
-Feel free to adjust, fork and use for your own benefit.
+Feel free to adjust, fork and use for your own benefit. -->
