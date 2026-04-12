@@ -31,7 +31,7 @@ sequenceDiagram
 
 ## Discovery
 
-The client sends a `Hello` packet to locate BroadLink devices on the local network; the device replies with its identity and network info. The packet is typically broadcast to `255.255.255.255:80`, and some clients additionally send it in parallel to `224.0.0.251:80` and `:16680` — the mDNS multicast group — presumably to avoid it being dropped by routers that filter directed broadcasts. `Authenticated` and `Locked` devices may not respond to multicast and require a directed broadcast or unicast to their known IP.
+The client sends a `Hello` packet to locate BroadLink devices on the local network; the device replies with its identity and network info. The packet is typically broadcast to `255.255.255.255:80`, and some clients additionally send it in parallel to `224.0.0.251:80` and `224.0.0.251:16680` — the mDNS multicast group — presumably to avoid it being dropped by routers that filter directed broadcasts. `Authenticated` and `Locked` devices may not respond to multicast and require a directed broadcast or unicast to their known IP.
 
 To unlock a BroadLink device (RM4/RM Pro), open the BroadLink-app, select the device, tap the top-right menu (...) -> "Property", and toggle "Lock device" to OFF.
 

@@ -107,6 +107,7 @@ local payload_names = {
     [0x03e9] = "Authorization Response",
     [0x006a] = "Command Request",
     [0x03ee] = "Command Response",
+    [0x0398] = "Join Response Error?"
 }
 
 local day_names = {
@@ -167,6 +168,7 @@ local subcmd_by_class = {
         [0x03] = "enter IR learning mode",
         [0x04] = "check_data: learned IR/RF data at payload+0x08",
         [0x24] = "check_sensors: temperature/humidity at fixed offsets",
+        [0x68] = "???",
     },
     rm4pro = {
         [0x01] = "get/update status",
@@ -252,7 +254,7 @@ end
 -- Ref: https://raw.githubusercontent.com/mjg59/python-broadlink/refs/heads/master/broadlink/__init__.py
 local device_info = {
     -- SP1
-    [0x0000] = { type = "sp1",    name = "SP1" },
+    [0x0000] = { type = "sp1",    name = "SP1 or Unknown" },
     -- SP2 family
     [0x2717] = { type = "sp2",    name = "NEO (Ankuoo)" },
     [0x2719] = { type = "sp2",    name = "SP2 (Honeywell)" },
@@ -384,32 +386,101 @@ local function get_device_payload_style(dev_type)
     return "classic"
 end
 
+local BroadlinkErrors = {
+  [0]  = "Success",
+  [-1] = "Authentication failed",
+  [-2] = "Logged in from another device / session invalid",
+  [-3] = "Device offline",
+  [-4] = "Command not supported",
+  [-5] = "Device storage full / module timeout",
+  [-6] = "Structure abnormal",
+  [-7] = "Control key expired",
+}
+
+local function toSigned16(value)
+  if value >= 0x8000 then
+    return value - 0x10000
+  end
+  return value
+end
+
+local function decodeBroadlinkError(value)
+  local signed = toSigned16(value)
+  return {
+    hex = string.format("0x%04X", value),
+    signed = signed,
+    message = BroadlinkErrors[signed] or "Unknown error"
+  }
+end
+
+local function decrypt_payload(enc_tvb)
+    if GcryptCipher == nil then return nil end
+    local cipher = GcryptCipher.open(GCRY_CIPHER_AES, GCRY_CIPHER_MODE_CBC, 0)
+    if not pcall(function() cipher:setkey(auth_key) end) then return nil end
+    cipher:setiv(auth_iv)
+    -- AES-CBC requires input to be a multiple of 16 bytes; truncate any trailing padding
+    local len = enc_tvb:len()
+    local aligned = len - (len % 16)
+    if aligned == 0 then return nil end
+    return cipher:decrypt(NULL, enc_tvb(0, aligned):bytes())  -- returns ByteArray
+end
+
+-- ── Checksum validation ────────────────────────────────────────────────────
+-- BroadLink packets carry a 16-bit little-endian checksum at bytes 0x20–0x21.
+-- Algorithm: start with 0xBEAF, add every byte in the packet (treating the
+-- two checksum bytes as zero), then keep the lower 16 bits.
+local function compute_checksum(tvb)
+    local sum = 0xBEAF
+    local raw = tvb():bytes()
+    for i = 0, raw:len() - 1 do
+        if i ~= 0x20 and i ~= 0x21 then
+            sum = (sum + raw:get_index(i)) % 0x10000
+        end
+    end
+    return sum
+end
+
+-- Adds the checksum ProtoField to `tree` and appends a [correct] / [INCORRECT]
+-- annotation.  Returns the new tree item.
+local function add_validated_checksum(tree, tvb)
+    local stored   = tvb(0x20, 2):le_uint()
+    local computed = compute_checksum(tvb)
+    local item = tree:add_le(pf_checksum, tvb(0x20, 2))
+    if stored == computed then
+        item:append_text(" [correct]")
+    else
+        item:append_text(string.format(" [INCORRECT, expected 0x%04x]", computed))
+        item:add_expert_info(PI_CHECKSUM, PI_WARN, "Bad checksum")
+    end
+    return item
+end
 
 -- Security mode names for AP provisioning
 local ap_security_names = { [0]="None", [1]="WEP", [2]="WPA1", [3]="WPA2", [4]="WPA1/2" }
 
 -- AP mode setup packet (136 bytes, sent to new device in AP mode, port 80 broadcast)
 -- Offset 0x26 = 0x14 identifies this packet type.
--- Ref: protocol.md "New device setup"
+-- Ref: protocol/index.md "New device setup"
 local function dissect_ap_setup(tvb, pktinfo, tree)
-    tree:add_le(pf_checksum, tvb(0x20, 2))
+    local join_tree = tree:add(broadlink, tvb(), "AP Mode Setup")
+    add_validated_checksum(join_tree, tvb)
 
     local ssid_len = tvb(0x84, 1):uint()
     local pwd_len  = tvb(0x85, 1):uint()
     local sec      = tvb(0x86, 1):uint()
 
     if ssid_len > 0 and ssid_len <= 32 then
-        tree:add(pf_ap_ssid,     tvb(0x44, ssid_len))
+        join_tree:add(pf_ap_ssid,     tvb(0x44, ssid_len))
     end
     if pwd_len > 0 and pwd_len <= 32 then
-        tree:add(pf_ap_password, tvb(0x64, pwd_len))
+        join_tree:add(pf_ap_password, tvb(0x64, pwd_len))
     end
-    tree:add(pf_ap_ssid_len,  tvb(0x84, 1))
-    tree:add(pf_ap_pwd_len,   tvb(0x85, 1))
+    join_tree:add(pf_ap_ssid_len,  tvb(0x84, 1))
+    join_tree:add(pf_ap_pwd_len,   tvb(0x85, 1))
     local sec_name = ap_security_names[sec] or "Unknown"
-    tree:add(pf_ap_security,  tvb(0x86, 1)):append_text(" (" .. sec_name .. ")")
+    join_tree:add(pf_ap_security,  tvb(0x86, 1)):append_text(" (" .. sec_name .. ")")
 
-    pktinfo.cols.info:set("Broadlink AP Setup")
+    pktinfo.cols.info:set("AP Setup")
 end
 
 local function dissect_discovery_request(tvb, tree)
@@ -422,12 +493,12 @@ local function dissect_discovery_request(tvb, tree)
         ip_raw(1,1):uint(), ip_raw(0,1):uint())
     tree:add(pf_src_ip, ip_raw):set_text("Source IP: " .. ip_str)
     tree:add_le(pf_src_port,  tvb(0x1c, 2))
-    tree:add_le(pf_checksum,  tvb(0x20, 2))
+    add_validated_checksum(tree, tvb)
 end
 
 local function dissect_discovery_response(tvb, pktinfo, tree)
     tree:add(pf_magic,         tvb(0x00, 8))
-    tree:add_le(pf_checksum,   tvb(0x20, 2))
+    add_validated_checksum(tree, tvb)
     tree:add_le(pf_command,    tvb(0x26, 2)):append_text(" (Discovery Response)")
     tree:add_le(pf_packet_count, tvb(0x28, 2))
 
@@ -483,10 +554,11 @@ local function dissect_base_packet(tvb, pktinfo, tree)
 
     -- Padding bytes 0x1e-0x1f are all zero in observed packets; skipping
 
-    tree:add_le(pf_checksum,     tvb(0x20, 2))
+    add_validated_checksum(tree, tvb)
     local err_item = tree:add_le(pf_error_code, tvb(0x22, 2))
     if tvb(0x22, 2):le_uint() ~= 0 then
-        err_item:append_text(" ← response error")
+        local err = decodeBroadlinkError(tvb(0x22, 2):le_uint())
+        err_item:append_text(" (" .. err.message .. ") ←←← Warning: Response Error")
     end
 
     local dev_type = tvb(0x24, 2):le_uint()
@@ -563,8 +635,8 @@ local function encrypted(tvb, pktinfo, tree)
                 local cipher = GcryptCipher.open(GCRY_CIPHER_AES, GCRY_CIPHER_MODE_CBC, 0)
 
                 if not pcall(function()
-                        -- Auth Request (0x65) and Auth Response (0x3e9) use the default AES128 key
-                        if pcommand == 0x65 or pcommand == 0x3e9 then
+                        -- Auth Request (0x65), Auth Response (0x3e9) and Join Response (0x0015) use the default AES128 key
+                        if pcommand == 0x65 or pcommand == 0x3e9 or pcommand == 0x0015 then
                             cipher:setkey(auth_key)
                         else
                             -- Prefer auto-cached session key for this device; fall back to preference
@@ -608,6 +680,24 @@ local function encrypted(tvb, pktinfo, tree)
                         tree:add(pt_tvb(0x64, json_len), "Metadata JSON: " .. (json_str ~= "" and json_str or "(empty)"))
                     end
 
+                -- Join Response decrypted payload structure (0x0015): JSON status blob
+                elseif pcommand == 0x0015 then
+
+                    local json_str = decrypted:raw():match("^([^\0]*)")
+                    tree:add(pt_tvb(), "JSON: " .. (json_str ~= "" and json_str or "(empty)"))
+                    -- Extract notable fields
+                    local function jstr(key) return json_str:match('"' .. key .. '"%s*:%s*"([^"]*)"') end
+                    local function jnum(key) return json_str:match('"' .. key .. '"%s*:%s*(%-?%d+)') end
+                    local hw      = jstr("hw")      if hw      then tree:add(pt_tvb(), "Hardware Platform: " .. hw)      end
+                    local ver     = jnum("ver")     if ver     then tree:add(pt_tvb(), "Firmware Version: "  .. ver)     end
+                    local svn     = jnum("svn")     if svn     then tree:add(pt_tvb(), "SVN Revision: "      .. svn)     end
+                    local ssid    = jstr("ssid")    if ssid    then tree:add(pt_tvb(), "SSID: "              .. (ssid ~= "" and ssid or "(not connected)")) end
+                    local bssid   = jstr("bssid")   if bssid   then tree:add(pt_tvb(), "BSSID: "             .. bssid)   end
+                    local rssi    = jnum("rssi")    if rssi    then tree:add(pt_tvb(), "RSSI: "              .. rssi)    end
+                    local uptime  = jnum("uptime")  if uptime  then tree:add(pt_tvb(), "Uptime (s): "        .. uptime)  end
+                    local devkey  = jstr("devkey")  if devkey  then tree:add(pt_tvb(), "Device Key: "        .. devkey)  end
+                    local did     = jstr("did")     if did     then tree:add(pt_tvb(), "Device ID: "         .. did)     end
+
                 -- Auth response decrypted payload structure (0x3e9):
                 elseif pcommand == 0x3e9 then
 
@@ -625,11 +715,12 @@ local function encrypted(tvb, pktinfo, tree)
                 -- Command request decrypted payload structure (0x006a):
                 elseif pcommand == 0x006a or pcommand == 0x3ee then
 
+                    local decrypted_len = decrypted:len()
                     -- Classic Broadlink devices (RM2/RM3/SP1/SP2) respond to auth with a 20-byte payload containing:
                     --   0x00–0x03  Device ID assigned by the device (uint32 LE)
                     --   0x04–0x13  AES-128 key for all subsequent command packets
                     local b0 = decrypted(0, 2):le_uint()
-                    tree:add(pt_tvb(0,1), "Sub-command: " .. string.format("0x%02x", b0))
+                    -- tree:add(pt_tvb(0,1), "Sub-command: " .. string.format("0x%02x", b0))
 
                     local dev_type = tvb(0x24, 2):le_uint()
                     -- RM4 / Red Bean devices prefix commands with  04 00 <cmd>.
@@ -643,51 +734,129 @@ local function encrypted(tvb, pktinfo, tree)
                         is_new = false
                     else
                         -- Unknown device: guess from payload bytes
-                        is_new = decrypted:len() >= 3
+                        is_new = decrypted_len >= 3
                                  and b0 == 0x0004
-                                 and decrypted(1,1):uint() == 0x00
+                                 and decrypted(1,1):le_uint() == 0x00
                     end
                     local subcmd, subcmd_off
                     if is_new then
-                        tree:add(pt_tvb(0x00, 0x02), "New style prefix: (0x0004)")
-                        subcmd     = decrypted(0x02, 1):uint()
+                        
+                        subcmd     = decrypted(0x02, 1):le_uint()
                         subcmd_off = 0x02
                     else
                         subcmd     = b0
                         subcmd_off = 0x00
                     end
+                    
+    -- if outer_cmd == 0x006a or outer_cmd == 0x03ee:
+    -- read first u32 little-endian as inner_opcode
+
+    -- if inner_opcode == 0x00000002:
+    --     decode as send_data:
+    --         u8 signal_type
+    --         u8 repeat
+    --         u16 data_len
+    --         bytes raw_data
+    -- elif inner_opcode == 0x00000068:
+    --     decode as rm5_status_action:
+    --         u32 opcode
+    --         remaining bytes as status words / reserved
+    -- else:
+    --     show as generic opaque inner payload
+
+                    tree:add(pt_tvb(0x00), "Protocol: " .. (is_new and "New" or "Classic") .. ", Length: " ..  decrypted_len )
 
                     local subcmd_name = get_subcmd_name(dev_type, subcmd)
-                    local subcmd_item = tree:add(pt_tvb(subcmd_off, 1), "Sub-command: " .. subcmd_name)
+                    local subcmd_item = tree:add(pt_tvb(subcmd_off, 1), "Sub-command: " .. subcmd_name .. string.format(" → (0x%02x)", subcmd))
+                    tree:add(pt_tvb(2, 4), "Subcommand: " .. string.format("0x%06x", decrypted(2, 4):le_uint())) 
+
+                    -- Sensor reading (subcmd 0x24) ─────────────────────────────────────
+                     -- and subcmd == 0x24
+
+                    if is_new then
+                        
+                        -- Naming package? (observed in RM5 auth response)
+                        if decrypted_len == 80 and decrypted(0, 4):le_uint() == 0x00 then
+                            local name_str = decrypted(4, 0x30):raw():match("^([^\0]*)")
+                            tree:add(pt_tvb(4, 0x30), "Name: " .. (name_str ~= "" and name_str or "(empty)"))
+                        -- JSON package with 0x5a5aa5a5 marker (observed with RM5)
+                        elseif decrypted_len >= 16  and decrypted(2, 4):le_uint() == 0x5a5aa5a5 then
+                            tree:add(pt_tvb(2, 4), "Magic Marker (0x5a5aa5a5)")
+                            tree:add(pt_tvb(6, 4), "Unknown Data: 0x" .. decrypted(6, 4):tohex())
+                            tree:add(pt_tvb(10, 4), "JSON Length: " .. decrypted(10, 4):le_uint())
+                            local length = decrypted(0, 2):le_uint() - 12
+                            local json_str = decrypted(14, length):raw():match("^([^\0]*)")
+                            tree:add(pt_tvb(14, length), "JSON: \"" .. (json_str ~= "" and json_str or "(empty)") .. "\"")
+                        end
+
+
+
+                        -- tree:add(pt_tvb(4, 0x30), "Data: " .. decrypted(4, 0x30):tohex())
+                            -- subcmd_item:add_text(" (truncated payload, cannot parse)")
+
+
+
+                        -- local msg_len = decrypted(0, 2):le_uint()
+                        -- tree:add(pt_tvb(0,2), "Length: " .. string.format("%d", msg_len) ..  " (" .. string.format("0x%04x", msg_len) .. ") => " ..  decrypted_len )
+                        -- tree:add(pt_tvb(2,4), "Command: " .. string.format("0x%06x", decrypted(2, 4):le_uint()))
+                        -- tree:add(pt_tvb(6, msg_len - 4), "Data: 0x" .. decrypted(6, msg_len - 4):tohex())
+                        --local sensor_id = decrypted(subcmd_off + 1, 1):uint()
+                        --local sensor_name = get_sensor_name(dev_type, sensor_id)
+                        -- tree:add(pt_tvb(subcmd_off + 1, 1), "Sensor ID: " .. sensor_name .. string.format(" (0x%02x)", sensor_id))
+                    
+                    
+                    end
+
+
 
                     -- ── Send IR / RF  (subcmd 0x02) ────────────────────────────────
-                    if subcmd == 0x02 and decrypted:len() >= subcmd_off + 6 then
-                        local data_off = subcmd_off + 1          -- byte after subcmd
-                        -- repeat count: 1 byte
-                        local repeat_cnt = decrypted(data_off, 1):uint()
-                        tree:add(pt_tvb(data_off, 1), "Repeat Count: " .. repeat_cnt)
-                        -- signal type: 1 byte
-                        if decrypted:len() >= data_off + 2 then
-                            local sig = decrypted(data_off + 1, 1):uint()
+                    if subcmd == 0x02 and decrypted_len >= subcmd_off + 6 then
+                        tree:add(pt_tvb(0, 2), "Length: " .. decrypted(0, 2):le_uint() .. " (" .. string.format("0x%04x", decrypted(0, 2):le_uint()) .. ")") 
+                        tree:add(pt_tvb(2, 4), "Subcommand: " .. string.format("0x%06x", decrypted(2, 4):le_uint())) 
+                        
+                        if pcommand == 0x006a then
+                            local sig = decrypted(6, 1):le_uint()
                             local sig_name = signal_type_names[sig] or string.format("Unknown (0x%02x)", sig)
-                            tree:add(pt_tvb(data_off + 1, 1), "Signal Type: " .. sig_name)
-                        end
-                        -- data length: uint16 LE  (bytes data_off+2 .. data_off+3)
-                        if decrypted:len() >= data_off + 4 then
-                            local dlen = decrypted(data_off + 2, 2):le_uint()
-                            tree:add(pt_tvb(data_off + 2, 2), "Data Length: " .. dlen)
-                            -- raw IR/RF pulse data starts at data_off+4
-                            local pulse_off = data_off + 4
-                            if decrypted:len() > pulse_off then
-                                local pulse_len = decrypted:len() - pulse_off
-                                tree:add(pt_tvb(pulse_off, pulse_len),
-                                    "IR/RF Data (" .. pulse_len .. " bytes): "
-                                    .. decrypted(pulse_off, pulse_len):tohex())
-                            end
+                            tree:add(pt_tvb(6, 1), "Signal Type: " .. sig_name)
+                            tree:add(pt_tvb(7, 1), "Repeat Count: " .. decrypted(7, 1):le_uint()) 
+                            local data_len = decrypted(8, 2):le_uint()
+                            tree:add(pt_tvb(8, 2), "Length: " .. data_len .. " (" .. string.format("0x%04x",data_len) .. ")")
+                            tree:add(pt_tvb(10, data_len), "Data: " .. decrypted(10, data_len):tohex()) 
+                        
+                        elseif pcommand == 0x3ee then
+
+
                         end
 
+    
+
+
+                        -- local data_off = subcmd_off + 1          -- byte after subcmd
+                        -- repeat count: 1 byte
+                        -- local repeat_cnt = decrypted(data_off  +4 , 1):uint()
+                        -- tree:add(pt_tvb(data_off, 1), "Repeat Count: " .. repeat_cnt)
+                        -- signal type: 1 byte
+                        -- if decrypted:len() >= data_off + 2 then
+                        --     local sig = decrypted(data_off + 1, 1):uint()
+                        --     local sig_name = signal_type_names[sig] or string.format("Unknown (0x%02x)", sig)
+                        --     tree:add(pt_tvb(data_off + 1, 1), "Signal Type: " .. sig_name)
+                        -- end
+                        -- data length: uint16 LE  (bytes data_off+2 .. data_off+3)
+                        -- if decrypted:len() >= data_off + 4 then
+                        --     local dlen = decrypted(data_off + 2, 2):le_uint()
+                        --     tree:add(pt_tvb(data_off + 2, 2), "Data Length: " .. dlen)
+                        --     -- raw IR/RF pulse data starts at data_off+4
+                        --     local pulse_off = data_off + 4
+                        --     if decrypted:len() > pulse_off then
+                        --         local pulse_len = decrypted:len() - pulse_off
+                        --         tree:add(pt_tvb(pulse_off, pulse_len),
+                        --             "IR/RF Data (" .. pulse_len .. " bytes): "
+                        --             .. decrypted(pulse_off, pulse_len):tohex())
+                        --     end
+                        -- end
+
                     -- ── SP2 / SP Mini set power  (subcmd 0x01 from outer device type) ──
-                    elseif subcmd == 0x66 and decrypted:len() >= subcmd_off + 2 then
+                    elseif pcommand == 0x3ee and subcmd == 0x66 and decrypted:len() >= subcmd_off + 2 then
                         local state = decrypted(subcmd_off + 1, 1):uint()
                         tree:add(pt_tvb(subcmd_off + 1, 1),
                             "Power State: " .. (state == 1 and "On" or state == 0 and "Off" or string.format("0x%02x", state)))
@@ -761,6 +930,36 @@ local function encrypted(tvb, pktinfo, tree)
     --     end
     -- end
 
+end
+
+local function dissect_join_response(tvb, pktinfo, tree)
+    pktinfo.cols.info:set("Join Response")
+    if tvb:len() < 0x38 then return end
+    local t = tree:add(broadlink, tvb(0x30), "Join Response Payload")
+    if tvb:len() <= 0x38 then return end
+    t:add("Encrypted data: " .. tvb(0x30))
+    if GcryptCipher == nil then
+        t:add("[Decryption unavailable: Wireshark build does not expose GcryptCipher to Lua]")
+        return
+    end
+    local dec = decrypt_payload(tvb(0x30))
+    if not dec then t:add("[Decryption failed]") return end
+    local pt_tvb = ByteArray.tvb(dec, "Decrypted Payload")
+    t:add(pt_tvb(), "Decrypted: " .. dec:tohex())
+    local json_str = dec:raw():match("^([^\0]*)")
+    if not json_str or json_str == "" then return end
+    t:add(pt_tvb(), "JSON: " .. json_str)
+    local function jstr(k) return json_str:match('"' .. k .. '"%s*:%s*"([^"]*)"') end
+    local function jnum(k) return json_str:match('"' .. k .. '"%s*:%s*(%-?%d+)') end
+    local hw     = jstr("hw")     if hw     then t:add(pt_tvb(), "Hardware Platform: "              .. hw)                               end
+    local ver    = jnum("ver")    if ver    then t:add(pt_tvb(), "Firmware Version: "               .. ver)                              end
+    local svn    = jnum("svn")    if svn    then t:add(pt_tvb(), "SVN Revision: "                   .. svn)                              end
+    local ssid   = jstr("ssid")   if ssid   then t:add(pt_tvb(), "SSID: "                           .. (ssid ~= "" and ssid or "(not connected)"))   end
+    local bssid  = jstr("bssid")  if bssid  then t:add(pt_tvb(), "BSSID: "                          .. bssid)                           end
+    local rssi   = jnum("rssi")   if rssi   then t:add(pt_tvb(), "RSSI: "                           .. rssi)                            end
+    local uptime = jnum("uptime") if uptime then t:add(pt_tvb(), "Uptime (s): "                     .. uptime)                          end
+    local devkey = jstr("devkey") if devkey then t:add(pt_tvb(), "Device Key: "                     .. devkey)                          end
+    local did    = jstr("did")    if did    then t:add(pt_tvb(), "Device ID (did, MAC): "           .. did)                             end
 end
 
 -- Authorization Request (0x0065)
@@ -862,14 +1061,24 @@ local function dissect_command_response_packet(tvb, pktinfo, tree)
 
 end
 
+-- Check for Broadlink magic bytes at the start of the packet. Valid packets have either:
+--   5a a5 aa 55 5a a5 aa 55
+--   00 00 00 00 00 00 00 00 (used by some clients)
 local function has_magic(tvb)
-    return tvb:len() >= 8 and tvb(0, 8):raw() == "\x5a\xa5\xaa\x55\x5a\xa5\xaa\x55"
+    if tvb:len() >= 8 and tvb(0, 8):raw() == "\x5a\xa5\xaa\x55\x5a\xa5\xaa\x55" then
+        return true
+    elseif tvb:len() >= 8 and tvb(0, 8):raw() == "\x00\x00\x00\x00\x00\x00\x00\x00" then
+        return true
+    end
+    return false
 end
 
 -- ── Main dissector ─────────────────────────────────────────────────────────
 
 function broadlink.dissector(tvb, pktinfo, root)
     local len = tvb:len()
+
+
     if len < 0x30 or not has_magic(tvb) then return 0 end
 
     pktinfo.cols.protocol:set("Broadlink")
@@ -882,7 +1091,20 @@ function broadlink.dissector(tvb, pktinfo, root)
         tree:append_text(" (" .. payload_name .. ")")
         dissect_base_packet(tvb, pktinfo, tree)
     
-        if payload_type == 0x0006 and len == 0x30 then
+        if payload_type == 0x0014 and len == 0x88 then
+            -- Join Request (0x0014)
+            pktinfo.cols.info:set("Join Request")
+            tree:append_text(" (AP Mode Setup)")
+            dissect_ap_setup(tvb, pktinfo, tree)
+        elseif payload_type == 0x0015 then
+            -- Join Response (0x0015), found when sending 0x0014 Join Request to an unjoined device
+            pktinfo.cols.info:set("Broadlink Join Response")
+            tree:append_text(" (AP Mode Setup)")
+            dissect_join_response(tvb, pktinfo, tree)
+        elseif payload_type == 0x0398 then
+            -- Join Response Error (0x0398), found when sending 0x0014 Join Request to an already-joined device
+            pktinfo.cols.info:set("Broadlink Response Error")
+        elseif payload_type == 0x0006 and len == 0x30 then
             -- Hello Request (0x0006) has no payload
             pktinfo.cols.info:set("Hello Request")
         elseif payload_type == 0x0007 and len == 0x80 then

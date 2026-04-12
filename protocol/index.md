@@ -42,7 +42,17 @@ The payload type, indicated by bytes `0x26–0x27` of the [Basic Header](#basic-
 | [`Join`](#join)          | `0x0014`   | `0x0015`    |
 | [`Auth`](#authorization) | `0x0065`   | `0x03e9`    |
 | [`Command`](#command)    | `0x006a`   | `0x03ee`    |
+| Join Response Error ???  |            | `0x0398`    |
 
+## Encryption
+
+Post-authentication payloads are AES-128-CBC encrypted. All devices share a well-known default key and IV used during provisioning and initial authentication. After a successful [`Auth`](#authorization) handshake the device issues a per-session key that replaces the default for all subsequent [`Command`](#command) packets.
+
+| Parameter   | Value                                       |
+|-------------|---------------------------------------------|
+| Algorithm   | AES-128-CBC                                 |
+| Default Key | `097628343fe99e23765c1513accf8b02`           |
+| Default IV  | `562e17996d093d28ddb3ba695a2e6f58`           |
 
 ## Basic Header
 
@@ -63,7 +73,7 @@ Fixed length of 0x30 bytes, all Little-Endian:
 | Source IP              | 0x18   | 0x1b   |  4 Bytes | Local IP address, one octet per byte ("Little-Endian")       |
 | Source Port            | 0x1c   | 0x1d   |  2 Bytes | LE uint16                                                    |
 | Padding                | 0x1e   | 0x1f   |  2 Bytes | Zero-padded                                                  |
-| Checksum               | 0x20   | 0x21   |  2 Bytes | LE uint16, checksum over the whole packet; calculated last   |
+| Checksum               | 0x20   | 0x21   |  2 Bytes | LE uint16, checksum over the whole packet; calculated last!  |
 | Error Code             | 0x22   | 0x23   |  2 Bytes | LE uint16                                                    |
 | Device Type            | 0x24   | 0x25   |  2 Bytes | LE uint16                                                    |
 | Payload Type           | 0x26   | 0x27   |  2 Bytes | LE uint16                                                    |
@@ -192,7 +202,8 @@ PayloadType: `0x0014` / `0x0015`
 
 Used while the device is in **AP mode** to provision WiFi credentials. Response is an empty ACK.
 
-#### Join Request Payload (128 bytes, offsets relative to payload start)
+#### Join Request (`0x0014`)
+(128 bytes, offsets relative to payload start)
 
 | Field            | Start  | End    | Length   | Value                                                   |
 |------------------|--------|--------|----------|---------------------------------------------------------|
@@ -203,6 +214,27 @@ Used while the device is in **AP mode** to provision WiFi credentials. Response 
 | Password Length  | 0x7d   | 0x7d   |  1 Byte  |                                                         |
 | Security Mode    | 0x7e   | 0x7e   |  1 Byte  | `0x00`=none, `0x01`=WEP, `0x02`=WPA1, `0x03`=WPA2, `0x04`=WPA1/2 |
 | Padding          | 0x7f   | 0x7f   |  1 Byte  | `0x00`                                                  |
+
+#### Join Response (`0x0015`)
+
+[Basic Header](#basic-header) followed (starting ar 0x30) with an encrypted payloas using the **default** AES-128-CBC key and IV (same as [`Auth`](#authorization)). Decrypts to a JSON status blob.
+
+##### Payload (decrypted, from 0x30)
+
+| JSON Field | Type   | Description                                      |
+|------------|--------|--------------------------------------------------|
+| `hw`       | string | Hardware platform (e.g. `"rtl8720"`)             |
+| `ver`      | number | Firmware version                                 |
+| `svn`      | number | SVN build revision                               |
+| `buildtime`| string | Build timestamp                                  |
+| `pid`      | number | Product ID                                       |
+| `did`      | string | Device ID / MAC address                          |
+| `uptime`   | number | Seconds since last reboot                        |
+| `ssid`     | string | Connected WiFi SSID (empty if not connected)     |
+| `bssid`    | string | Connected WiFi BSSID (`"000000000000"` if none)  |
+| `rssi`     | number | WiFi signal strength (dBm, negative; `0` if none)|
+| `devkey`   | string | Device key (hex, 16 bytes)                       |
+
 
 ---
 
@@ -271,7 +303,7 @@ When using Device Type: 0x5224 → RM5 Pro, in europ, the BroadLink-app supplid 
 |------------------------|--------|--------|----------|-------------------------------------------------------------|
 | Device ID              | 0x00   | 0x03   |  4 Bytes | Assigned device ID; store for future packets (e.g. `0x00000001`)               |
 | Encryption Key         | 0x04   | 0x13   | 16 Bytes | AES key for all subsequent communication                    |
-| Tail Padding         | 0x14   | 0x1f   | 12 Bytes |
+| Tail Padding           | 0x14   | 0x1f   | 12 Bytes |
 
 
 ```mermaid
@@ -290,19 +322,103 @@ packet
 ### `Command`
 PayloadType: `0x006a` | `0x03ee`  
 
+
 The structure of the decrypted `Command` payload (decrypted, from `0x38...`) differs between device generations.
+
+[Basic Header](#basic-header)
+
+
+| Field                  | Start  | End    | Length   | Value                                                             |
+|------------------------|--------|--------|----------|-------------------------------------------------------------------|
+| Device ID              | 0x30   | 0x33   |  4 Bytes | Obtained during authentication, 0x00 before authentication)       |
+| Checksum               | 0x34   | 0x35   |  2 Bytes | Checksum of unencrypted payload as a little-endian 16 bit integer |
+| Padding                | 0x36   | 0x37   |  2 Bytes | 0x0000                                                            |
 
 #### Classic (RM2/RM3/SP1/SP2)
 
-| Field       | Start | End  | Length   | Value                     |
-|-------------|-------|------|----------|---------------------------|
-| Subcommand  | 0x00  | 0x00 | 1 Byte   | Identifies the operation  |
-| Data        | 0x01  | …    | Variable | Command-specific data     |
+| Field                  | Start  | End  | Length   | Value                     |
+|------------------------|--------|------|----------|---------------------------|
+| Subcommand             | 0x38   | 0x38 | 1 Byte   | Identifies the operation  |
+| Data                   | 0x39   | …    | Variable | Command-specific data     |
 
-#### New (RM4/MP1)
 
-| Field    | Start | End  | Length  | Value                                |
-|----------|-------|------|---------|--------------------------------------|
-| Length   | 0x00  | 0x01 | 2 Bytes | LE uint16 — length of data field     |
-| Command  | 0x02  | 0x05 | 4 Bytes | LE uint32 — identifies the operation |
-| Data     | 0x06  | …    | Variable | Command-specific data               |
+#### New (RM3*, RM4 and RM5)
+
+| Field                  | Start  | End  | Length   | Value                                |
+|------------------------|--------|------|----------|--------------------------------------|
+| Length                 | 0x38   | 0x39 | 2 Bytes  | LE uint16 — length of data field     |
+| Command                | 0x40   | 0x44 | 4 Bytes  | LE uint32 — identifies the operation |
+| Data                   | 0x06   | …    | Variable | Command-specific data                |
+
+
+#### Command Request (`0x006a`)
+Device specific...
+
+#### Command Response (`0x03ee`)
+Device specific...
+
+---
+
+## RM Flows
+
+#### Learning Mode
+
+##### Entering Learning Mode
+Send the following 16 byte `Request` payload with a command value of 0x006a:
+
+Offset|Contents|
+|------|--------|
+|0x00|0x03|
+|0x01-0x0f|0x00|
+
+##### Reading back data from learning mode
+------------------------------------
+
+Send the following 16 byte payload with a command value of 0x006a:
+
+|Offset|Contents|
+|------|--------|
+|0x00|0x04|
+|0x01-0x0f|0x00|
+
+Byte 0x22 of the response contains a little-endian 16 bit error code. If this is 0, a code has been obtained. Bytes 0x38 and onward of the response are encrypted. Decrypt them. Bytes 0x04 and onward of the decrypted payload contain the captured data.
+
+#### Sending IR/RF Data
+
+Send the following `Request` (0x006a) payload:
+
+
+|Offset|Contents|
+|------|--------|
+|0x00|0x02| 
+|0x01-0x03|0x00|
+|0x04|0x26 = IR, 0xb2 for RF 433Mhz, 0xd7 for RF 315Mhz|
+|0x05|repeat count, (0 = no repeat, 1 send twice, .....)|
+|0x06-0x07|Length of the following data in little endian|
+|0x08 ....|Pulse lengths in 2^-15 s units (µs * 269 / 8192 works very well)|
+|....|For IR codes, the pulse lengths should be paired as ON, OFF|
+
+New:
+|Offset|Contents|
+|---------|--------|
+|0x00-0x01| Inner Length |
+|0x02-0x05| Subcommand (2  = send_data)
+|0x06     | Signal Type: 0x26 = IR, 0xb2 for RF 433Mhz, 0xd7 for RF 315Mhz|
+|0x07     | Repeat count, (0 = no repeat, 1 send twice, ...)|
+|0x08-0x09|Length of the following data in little endian|
+|0x10-0x12| Extended timing value
+00           trailing byte
+00 ...       AES padding
+
+32.84 µs ticks
+
+Each value is represented by one byte. If the length exceeds one byte
+then it is stored big endian with a leading 0.
+
+Captures of IR codes from the device will always end with a constant OFF value of `0x00 0x0d 0x05` but the trailing silence can be anything on transmit. The likely reason for this value is a capped timeout value on detection. The value is about 102 milliseconds.
+
+Example: The header for my Optoma projector is 8920 4450  
+8920 * 269 / 8192 = 0x124  
+4450 * 269 / 8192 = 0x92  
+
+So the data starts with `0x00 0x1 0x24 0x92 ....`
