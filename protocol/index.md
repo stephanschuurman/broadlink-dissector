@@ -37,12 +37,22 @@ The payload type, indicated by bytes `0x26–0x27` of the [Basic Header](#basic-
 
 | Payload Type             | Request ID | Response ID |
 |--------------------------|------------|-------------|
+| [`Ping`](#ping)          | `0x0001`   | —           |
 | [`Hello`](#hello)        | `0x0006`   | `0x0007`    |
 | [`Discover`](#discover)  | `0x001a`   | `0x001b`    |
 | [`Join`](#join)          | `0x0014`   | `0x0015`    |
 | [`Auth`](#authorization) | `0x0065`   | `0x03e9`    |
 | [`Command`](#command)    | `0x006a`   | `0x03ee`    |
-| Join Response Error ???  |            | `0x0398`    |
+
+Other:
+- `0x0398` - Join Response Error? Found (RM5+) when already connected to WiFi and Join Request is send)
+- `0x000e` - Joined WiFi Broadcast? Found (RM5+) when adapting device to WiFi. Only (Basic Header) broadcast was send 10x to 255.255.255.255.
+
+### Ping
+PayloadType: `0x0001`
+
+Keepalive / heartbeat packet. Only a Basic Header is sent; no payload.
+
 
 ## Encryption
 
@@ -152,8 +162,8 @@ Used to discover Broadlink devices on the local network. Sent as a **UDP broadca
 | Device IP    | 0x06   | 0x09   |  4 Bytes | Reversed byte order (last octet first)                    |
 | MAC Address  | 0x0a   | 0x0f   |  6 Bytes | One octet per byte                                        |
 | Device Name  | 0x10   | 0x4d   | 60 Bytes | UTF-8 string, null-terminated                             |
-| Lock Status  | 0x4e   | 0x4e   |  1 Byte  | `0x00` = unlocked, `0x01` = locked                        |
-| Padding      | 0x4f   | 0x4f   |  1 Byte  | `0x00`                                                    |
+| Unknown      | 0x4e   | 0x4e   |  1 Byte  |                                                           |
+| Lock Status  | 0x4f   | 0x4f   |  1 Byte  | `0x00` = unlocked, `0x01` = locked                        |
 
 ```mermaid
 ---
@@ -207,13 +217,14 @@ Used while the device is in **AP mode** to provision WiFi credentials. Response 
 
 | Field            | Start  | End    | Length   | Value                                                   |
 |------------------|--------|--------|----------|---------------------------------------------------------|
-| Padding          | 0x00   | 0x3b   | 60 Bytes | `0x00`                                                  |
-| SSID             | 0x3c   | 0x5b   | 32 Bytes | ASCII string (zero-padded)                              |
-| Password         | 0x5c   | 0x7b   | 32 Bytes | ASCII string (zero-padded)                              |
-| SSID Length      | 0x7c   | 0x7c   |  1 Byte  |                                                         |
-| Password Length  | 0x7d   | 0x7d   |  1 Byte  |                                                         |
-| Security Mode    | 0x7e   | 0x7e   |  1 Byte  | `0x00`=none, `0x01`=WEP, `0x02`=WPA1, `0x03`=WPA2, `0x04`=WPA1/2 |
-| Padding          | 0x7f   | 0x7f   |  1 Byte  | `0x00`                                                  |
+| Padding          | 0x30   | 0x43   |          | `0x00`                                                  |
+| SSID             | 0x44   | 0x63   | 32 Bytes | ASCII string (zero-padded)                              |
+| Password         | 0x64   | 0x83   | 32 Bytes | ASCII string (zero-padded)                              |
+| SSID Length      | 0x84   | 0x84   |  1 Byte  |                                                         |
+| Password Length  | 0x85   | 0x85   |  1 Byte  |                                                         |
+| Security Mode    | 0x86   | 0x86   |  1 Byte  | `0x00`=none, `0x01`=WEP, `0x02`=WPA1, `0x03`=WPA2, `0x04`=WPA1/2 |
+| Padding          | 0x87   | 0x87   |  1 Byte  | `0x00`                                                  |
+
 
 #### Join Response (`0x0015`)
 
@@ -252,13 +263,15 @@ Auth request (`0x65`) and response (`0x3e9`) use the **default** AES-128-CBC key
 |------------------------|--------|--------|----------|-------------------------------------------------------------|
 | Reserved 0             | 0x00   | 0x03   |  4 Bytes | `0x00000000`                                                |
 | Device Identifier      | 0x04   | 0x13   | 16 Bytes | 16-digit device identifier (e.g. IMEI)                      |
-| Reserved 1             | 0x14   | 0x1b   |  8 Bytes | `0x00...`                                                   |
-| Flag                   | 0x1c   | 0x1c   |  1 Byte  | `0x01`                                                      |
-| Reserved 2             | 0x1d   | 0x2f   | 19 Bytes | `0x000000`                                                  |
+| Reserved 1             | 0x14   | 0x1d   | 10 Bytes | `0x00...`                                                   |
+| Flag                   | 0x1e   | 0x1e   |  1 Byte  | `0x01`                                                      |
+| Reserved 2             | 0x1f   | 0x2c   | 14 Bytes | `0x00...`                                                   |
+| Flag 2                 | 0x2d   | 0x2d   |  1 Byte  | `0x01`                                                      |
+| Reserved 3             | 0x2e   | 0x2f   |  2 Bytes | `0x00...`                                                   |
 | Client Name            | 0x30   | 0x4f   | 32 Bytes | NULL-terminated ASCII string (zero-padded)                  |
-| Reserved 3             | 0x50   | 0x53   |  4 Bytes | `0x00...`                                                   |
+| Reserved 4             | 0x50   | 0x53   |  4 Bytes | `0x00...`                                                   |
 | Auth Blob              | 0x54   | 0x63   | 16 Bytes |                                                             |
-| Metadata JSON          | 0x64   | …      | Variable | JSON string                                                 |
+| Metadata JSON          | 0x64   | …      | Variable | JSON string (see example below)                             |
 
 ```mermaid
 ---
@@ -269,12 +282,14 @@ config:
 ---
 packet
 0-3: "0x00000000"
-4-19: "Client Token Identifier"
-20-27:  "Reserved 1"
-28:  "Flag"
-29-47:  "Reserved 2"
+4-19: "Device Identifier (IMEI)"
+20-29: "Reserved 1"
+30: "Flag 0x01"
+31-44: "Reserved 2"
+45: "Flag 0x01"
+46-47: "Reserved 3"
 48-79: "Client Name"
-80-83: "0x00000000"
+80-83: "Reserved 4"
 84-99: "Auth Blob"
 100-159: "JSON String ..."
 ```
@@ -290,7 +305,11 @@ When using Device Type: 0x5224 → RM5 Pro, in europ, the BroadLink-app supplid 
 }
 ```
 
+88478	2026-04-13 21:08:10.658505	192.168.10.100	192.168.10.1	DNS	85	Standard query 0x2c3f HTTPS 
+
+
 <!-- Other domains found:
+- app-service-deu-81f3c7fd.ibroadlink.com
 - device-heartbeat-deu-6dc239d5.ibroadlink.com
 - device-gateway-deu-6dc239d5.ibroadlink.com
 - device-heartbeat-deu-6dc239d5.ibroadlink.com
@@ -344,11 +363,13 @@ The structure of the decrypted `Command` payload (decrypted, from `0x38...`) dif
 
 #### New (RM3*, RM4 and RM5)
 
+Offsets relative to start of decrypted payload:
+
 | Field                  | Start  | End  | Length   | Value                                |
 |------------------------|--------|------|----------|--------------------------------------|
-| Length                 | 0x38   | 0x39 | 2 Bytes  | LE uint16 — length of data field     |
-| Command                | 0x40   | 0x44 | 4 Bytes  | LE uint32 — identifies the operation |
-| Data                   | 0x06   | …    | Variable | Command-specific data                |
+| Length                 | 0x00   | 0x01 | 2 Bytes  | LE uint16 — length of data field     |
+| Command                | 0x02   | 0x03 | 2 Bytes  | LE uint16 — identifies the operation |
+| Data                   | 0x04   | …    | Variable | Command-specific data                |
 
 
 #### Command Request (`0x006a`)
@@ -422,3 +443,20 @@ Example: The header for my Optoma projector is 8920 4450
 4450 * 269 / 8192 = 0x92  
 
 So the data starts with `0x00 0x1 0x24 0x92 ....`
+
+#### Delete? `0x68`
+Command Code: 0x006a (Command Request)
+Decrypted: 68000000000000000000000000000000
+
+Command Code: 0x03ee (Command Response)
+Decrypted: 680000009FF200009FF200000000000030F20000000000000000000000000000
+
+
+## Apps
+
+### iOS/iPadOS
+
+- e-Control: Seems not the be compatible with RM devices. It's using port 15000 for WiFi pairing message with the credentials, also package stucture differs.
+- Broadlink: Uses Bluetooth to transfer WiFi credentials.
+- NoApp: Unclear as login is required, does send out Hello Request's (Command Code: 0x0006).
+- ihc for EU: Unclear as login is required, does send out Hello Request's (Command Code: 0x0006).

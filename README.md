@@ -13,12 +13,12 @@ Copy the plugin to your Wireshark plugins folder:
 
 **macOS / Linux**
 ```bash
-cp broadlink_dissector.lua ~/.config/wireshark/plugins/
+cp broadlink.lua ~/.config/wireshark/plugins/
 ```
 
 **Windows**
 ```
-copy broadlink_dissector.lua %APPDATA%\Wireshark\plugins\
+copy broadlink.lua %APPDATA%\Wireshark\plugins\
 ```
 
 Then reload plugins — no restart needed:
@@ -32,7 +32,7 @@ Then reload plugins — no restart needed:
 Validate the file before loading it:
 
 ```bash
-luac -p broadlink_dissector.lua && echo "OK"
+luac -p broadlink.lua && echo "OK"
 ```
 
 ---
@@ -151,6 +151,7 @@ _**Option 2**_: From a rooted Android device, where the tcpdump is also availabl
 
 _**Option 3**_: Use a phone or tablet app on your dev machine (e.g. running the [iPad BroadLink-app](https://apps.apple.com/nl/app/broadlink/id1450257910) on macOS).
 
+_**Option 4**_: Use a phone or tablet app and connect you dev machine (e.g. running the `xcrun rvictl -s xxxxxxxxxxxxx-xxxxxxxxxxxxxxxx` on macOS to connect to an iPhone/iPad).
 
 
 ### Analyze the captured packets and use the dissector
