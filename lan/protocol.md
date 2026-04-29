@@ -3,12 +3,13 @@
 BroadLink is a proprietary `UDP`-based protocol used by BroadLink smart home devices (RM series IR blasters, SP series smart plugs, etc.) for local network communication. All packets share a fixed `0x30`-byte binary header, followed by an optional extended header and variable-length payload. Post-authentication traffic is AES-128-CBC encrypted. Interaction sequences are described in [sequences.md](sequences.md).
 
 ## References
-- [psumdomus blog-post](https://medium.com/smart-home-diy/broadlink-smart-home-devices-complete-protocol-hack-bc0b4b397af1)
-- [mjg59/python-broadlink](https://github.com/mjg59/python-broadlink/) : [protocol.md](https://github.com/mjg59/python-broadlink/blob/master/protocol.md)
+- [psumdomus: blog-post about the broadlink protocol](https://medium.com/smart-home-diy/broadlink-smart-home-devices-complete-protocol-hack-bc0b4b397af1)
+- [mjg59:python-broadlink](https://github.com/mjg59/python-broadlink/) : [protocol.md](https://github.com/mjg59/python-broadlink/blob/master/protocol.md)
 - [csabavirag/broadlink-dissector](https://github.com/csabavirag/broadlink-dissector)
-- [aiobroadlink](https://github.com/frawau/aiobroadlink)
+- [frawau/aiobroadlink](https://github.com/frawau/aiobroadlink)
 - [eschava/broadlink-mqtt](https://github.com/eschava/broadlink-mqtt)
 - [momodalo/broadlinkjs](https://github.com/momodalo/broadlinkjs/)
+- [felipediel/broadlink-hacktools](https://github.com/felipediel/broadlink-hacktools)
 
 
 ## Broadlink Package
@@ -35,18 +36,56 @@ packet
 ## Payload Types
 The payload type, indicated by bytes `0x26–0x27` of the [Basic Header](#basic-header), identifies the purpose of each packet. The interaction sequences are described in [sequences.md](sequences.md).
 
-| Payload Type             | Request ID | Response ID |
-|--------------------------|------------|-------------|
-| [`Ping`](#ping)          | `0x0001`   | —           |
-| [`Hello`](#hello)        | `0x0006`   | `0x0007`    |
-| [`Discover`](#discover)  | `0x001a`   | `0x001b`    |
-| [`Join`](#join)          | `0x0014`   | `0x0015`    |
-| [`Auth`](#authorization) | `0x0065`   | `0x03e9`    |
-| [`Command`](#command)    | `0x006a`   | `0x03ee`    |
+| Payload Type             | Request ID      | Response ID                     |
+|--------------------------|-----------------|---------------------------------|
+| [`Ping`](#ping)          | `0x0001` (1)    | —                               |
+| [`Hello`](#hello)        | `0x0006` (6)    | `0x0007` (7)                    |
+| [`Join`](#join)          | `0x0014` (20)   | `0x0015` (21), `0x0398` (920)   |
+| [`Discover`](#discover)  | `0x001a` (26)   | `0x001b` (27)                   |
+| [`Auth`](#authorization) | `0x0065` (101)  | `0x03e9` (1001)                 |
+| [`Command`](#command)    | `0x006a` (106)  | `0x03ee` (1006)                 |
 
-Other:
-- `0x0398` - Join Response Error? Found (RM5+) when already connected to WiFi and Join Request is send)
-- `0x000e` - Joined WiFi Broadcast? Found (RM5+) when adapting device to WiFi. Only (Basic Header) broadcast was send 10x to 255.255.255.255.
+Note the fixed offset of **+**`0x0384` (or **+900**) bewteen command and response code.
+
+### Other - RM5 Plus / RM5+
+
+Observed on an RM5 Plus; purpose not fully documented.
+
+| Request ID       | Response ID        | Description                                                                                                                                   |
+|------------------|--------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
+| —                | `0x000e` (14)      | Broadcast-only (Basic Header, no payload), sent **10×** to `255.255.255.255` during WiFi provisioning; possibly a joined announcement.        |
+| `0x002a` (42)    | `0x002b` (43)      | Date/time. Response contains: Year (LE uint16), Day of Month, Hours, Minutes, Seconds, and 2 unknown bytes.                                   |
+| —                | `0x0398` (920)     | Join error response. Sent by the device when a [Join Request](#join)    is received but the device is already connected to WiFi.              |
+| `0x0031` (49)    |                    | Unknown... Lack of response when sending a radom package |
+| `0x0037` (55)    |                    | Unknown... Lack of response when sending a radom package |
+| `0x0077` (119)   | `0x03fb` (1019)    | Triggers a device reset (even when locked). Device responds **10×**, then reboots.                                                            |
+| `0x0078` (120)   | `0x03fc` (1020)    | Response payload is 240 bytes of zeros.                                                                                                       |
+| `0x03e7` (999)   | `0x076b` (1899)    | Response contains the device name.                                                                                                            |
+| `0x2724` (10020) | `0x2725` (10021)   | Cloud Request (to port 7795 broadlink server) using basic header followed by JSON (starting at 0x30).                                     |
+
+**Cloud Request `0x2724`**
+
+Both type 4 and type 6 messages found.
+```{
+  "mac": "348e89xxxxxx",
+  "header": {
+    "type": "6",
+    "did": "xxxxxxxxxxxx",
+    "pid": "00000000000000000000000024520000",
+    "authcode": "0000xxxxxxxxxxxx...",
+    "devicetype": "21028"
+  },
+  "body": "IxFjN+tZ...=="
+}
+```
+
+**Cloud Response `0x2725`**
+
+Found with `Source IP` (0x18-0x1b): 86.252.87.84
+```
+{"body":"<base64-encoded-encrypted-body>","mac":"xxxxxxxxxxxx"}
+```
+
 
 ### Ping
 PayloadType: `0x0001`
@@ -118,6 +157,24 @@ packet
 40-41: "Packet Count"
 42-47: "MAC Address"
 ```
+#### Error Codes
+
+The Error Code field (`0x22–0x23`) is a signed LE int16. A value of `0x0000` means success.
+
+| Code | Description                                    |
+|------|------------------------------------------------|
+|  `0` | Success                                        |
+| `-1` | Authentication failed                          |
+| `-2` | You have been logged out                       |
+| `-3` | The device is offline                          |
+| `-4` | Command not supported                          |
+| `-5` | The device storage is full                     |
+| `-6` | Structure is abnormal                          |
+| `-7` | Control key is expired                         |
+| `-8` | Send error                                     |
+| `-9` | Write error                                    |
+| `-10`| Read error                                     |
+| `-11`| SSID could not be found in AP configuration    |
 
 
 ### Payload

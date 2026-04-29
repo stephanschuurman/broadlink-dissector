@@ -149,6 +149,7 @@ local CMD = {
 }
 
 local payload_names = {
+    [CMD.PING]               = "Ping",
     [CMD.HELLO_REQUEST]      = "Hello Request",
     [CMD.HELLO_RESPONSE]     = "Hello Response",
     [CMD.DISCOVERY_REQUEST]  = "Discovery Request",
@@ -904,14 +905,16 @@ local function dissect_join_response(tvb, pktinfo, tree)
     local did    = jstr("did")    if did    then t:add(pt_tvb(), "Device ID (did): "   .. did)                                    end
 end
 
--- Check for Broadlink magic bytes at the start of the packet. Valid packets have either:
---   5a a5 aa 55 5a a5 aa 55
---   00 00 00 00 00 00 00 00 (used by some clients)
+-- Check for Broadlink magic bytes at the start of the packet. Valid packets start with:
+--   5a a5 aa 55 5a a5 xx xx  (first 6 bytes fixed; last 2 vary by firmware/version)
+--   00 00 00 00 00 00 00 00  (used by some older clients)
+-- Observed last-2-byte variants: aa 55 (classic), 00 00 (RM5+ / newer firmware)
 local function has_magic(tvb)
     if tvb:len() < 8 then return false end
-    local magic = tvb(0, 8):raw()
-    return magic == "\x5a\xa5\xaa\x55\x5a\xa5\xaa\x55"
-        or magic == "\x00\x00\x00\x00\x00\x00\x00\x00"
+    local magic6 = tvb(0, 6):raw()
+    local magic8 = tvb(0, 8):raw()
+    return magic6 == "\x5a\xa5\xaa\x55\x5a\xa5"
+        or magic8 == "\x00\x00\x00\x00\x00\x00\x00\x00"
 end
 
 -- ── Main dissector ─────────────────────────────────────────────────────────
@@ -973,7 +976,7 @@ function broadlink.dissector(tvb, pktinfo, root)
         end
     else
         tree:append_text(" (Unknown)")
-        pktinfo.cols.info:set("Broadlink Unknown Packet")
+        pktinfo.cols.info:set("Broadlink Unknown Packet (" .. string.format("0x%04x", payload_type) .. ")")
     end
 
     return len
@@ -986,5 +989,8 @@ end
 local udp_table = DissectorTable.get("udp.port")
 udp_table:add(default_settings.port, broadlink)
 udp_table:add(16680, broadlink)
+udp_table:add(16410, broadlink)  
 udp_table:add(8899,  broadlink)  -- common Broadlink command port
+udp_table:add(7795,  broadlink)  -- Cloud devices, observed with RM5+ on LAN
+udp_table:add(1812,  broadlink)  -- Cloud devices, observed with RM5+ on LAN
 dprint2("Broadlink dissector registered on UDP port", default_settings.port)
