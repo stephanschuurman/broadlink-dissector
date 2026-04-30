@@ -2,6 +2,11 @@
 
 Next to the regular protocol also another protocol is used (at least with the RM5+).
 
+## Adapted LAN Protocol
+
+Similar to the [lan-protocl](/lan-protocol/protocol.md) only the data/time fields bytes are used diffrently.
+
+
 ## Protocol 1812 
 
 Communicates over UDP port `1812` (server side for both receive and send). 

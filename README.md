@@ -3,7 +3,7 @@ A Wireshark Lua dissector for the Broadlink Smart Home Protocol. Decodes UDP tra
 
 Partially based on [csabavirag/broadlink-dissector](https://github.com/csabavirag/broadlink-dissector).
 
-Protocol documentation: [LAN](protocol/index.md) and [Cloud](cloud/protocol.md)
+Protocol documentation: [LAN](lan-protocol/protocol.md) and [Cloud](cloud-protocol/protocol.md)
 
 
 ## Pre-requisites

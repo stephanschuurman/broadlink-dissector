@@ -124,7 +124,7 @@ Fixed length of 0x30 bytes, all Little-Endian:
 | Padding                | 0x1e   | 0x1f   |  2 Bytes | Zero-padded                                                  |
 | Checksum               | 0x20   | 0x21   |  2 Bytes | LE uint16, checksum over the whole packet; calculated last!  |
 | Error Code             | 0x22   | 0x23   |  2 Bytes | LE uint16                                                    |
-| Device Type            | 0x24   | 0x25   |  2 Bytes | LE uint16                                                    |
+| [Device Type](/lan-protocol/device-types.md)            | 0x24   | 0x25   |  2 Bytes | LE uint16                                                    |
 | Payload Type           | 0x26   | 0x27   |  2 Bytes | LE uint16                                                    |
 | Packet Count           | 0x28   | 0x29   |  2 Bytes | LE uint16, idx                                               |
 | MAC Address            | 0x2a   | 0x2f   |  6 Bytes | One octet per byte ("Little-Endian")                         |
