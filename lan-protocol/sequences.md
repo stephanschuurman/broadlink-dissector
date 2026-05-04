@@ -117,3 +117,56 @@ sequenceDiagram
     D-->>C: Command response
     Note over D,C: command at 0x26..0x27 = 0x03ee
 ```
+
+## RM Learn Command (checked with RM5+)
+
+Puts the RM device into IR learning mode and polls until a code is captured (max 30 seconds).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant D as RM Device
+
+    Note over C,D: Requires active Auth session (Session Key + Device ID)
+
+    Note over C,D: Enter learning mode — 3 requests sent back-to-back
+    C->>D: Command Request (0x006a) ×3 — subcmd 0x03 (enter learning)
+    D-->>C: Command Response (0x03ee) ×3
+    Note over D: RM enters learning mode, waiting for IR signal
+
+    Note over C,D: Hello broadcast — app re-discovers device (~2 s timer)
+    C->>D: Hello Request (0x0006) ×3 — 255.255.255.255 + 224.0.0.251
+    D-->>C: Hello Response (0x0007)
+
+    loop Poll for captured data (~every 2 sec, max 10×)
+        C->>D: Command Request (0x006a) ×3 — subcmd 0x04 (check_data)
+        C->>D: Hello Request (0x0006) ×3 — concurrent re-discovery broadcast
+        D-->>C: Command Response (0x03ee) ×3
+        D-->>C: Hello Response (0x0007)
+        Note over C: error code 0x0000 → IR data captured<br/>error code 0xfffb → null data (not ready), continue polling
+    end
+```
+Three requests are sent back-to-back for every command type. On a successful `check_data` (error `0x0000`) the response payload is 180 bytes (vs. 100 for an error), containing the captured IR data. The two trailing responses to the duplicate requests carry error `0xfffb` (null data / not yet captured). Hello broadcasts run on a ~2 s timer concurrently with the polling.
+
+Once the IR data is captured, the app does two more Hello broadcast rounds before playing back the learned signal:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as User
+    participant C as Client
+    participant D as RM Device
+
+    Note over C,D: Playback — 3 requests back-to-back
+    C->>D: Command Request (0x006a) ×3 — subcmd 0x02 (send_data, IR payload)
+    D-->>C: Command Response (0x03ee) ×2
+    Note over D: RM transmits learned IR signal
+
+    C->>U: "Did the device respond?"
+    alt Yes
+        Note over C: Save learned command
+    else No
+        Note over C: Discard and restart learning
+    end
+```

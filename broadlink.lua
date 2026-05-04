@@ -109,7 +109,7 @@ local pf_device_mac     = ProtoField.ether  ("broadlink.device_mac",       "Devi
 local pf_locked_status  = ProtoField.uint8  ("broadlink.locked_status",    "Locked Status",    base.DEC)
 local pf_device_iden    = ProtoField.bytes  ("broadlink.device_iden",      "Device Identifier (IMEI)")
 local pf_flag           = ProtoField.uint8  ("broadlink.flag",             "Flag",             base.HEX)
-local pf_auth_key       = ProtoField.bytes  ("broadlink.auth_key",         "Auth Key")
+local pf_auth_key       = ProtoField.bytes  ("broadlink.auth_key",         "Session Key")
 local pf_signal_type    = ProtoField.uint8  ("broadlink.signal_type",      "Signal Type",      base.HEX)
 local pf_command        = ProtoField.uint16 ("broadlink.command",          "Command Code",     base.HEX)
 local pf_payload_chksum = ProtoField.uint16 ("broadlink.payload_checksum", "Payload Checksum", base.HEX)
@@ -146,6 +146,7 @@ local CMD = {
     JOIN_ERROR         = 0x0398,
     AUTH_RESPONSE      = 0x03e9,
     COMMAND_RESPONSE   = 0x03ee,
+    JSON_ENVELOPE      = 0x2724,  -- JSON-framed LAN-cloud message (RM5+ port 7795)
 }
 
 local payload_names = {
@@ -161,6 +162,39 @@ local payload_names = {
     [CMD.COMMAND_REQUEST]    = "Command Request",
     [CMD.COMMAND_RESPONSE]   = "Command Response",
     [CMD.JOIN_ERROR]         = "Join Response Error?",
+    [CMD.JSON_ENVELOPE]      = "JSON Envelope",
+}
+
+-- Short labels for the Info column, keyed by sub-command byte.
+-- Two tables: new-style (04 00 <cmd> prefix) and classic (bare byte).
+local subcmd_info_labels_new = {
+    [0x01] = "Read status",
+    [0x02] = "Send IR/RF",
+    [0x03] = "Enter IR learning",
+    [0x04] = "Check captured data",
+    [0x19] = "Enter RF sweep",
+    [0x1a] = "Check RF frequency",
+    [0x1b] = "Read captured RF data",
+    [0x1e] = "Cancel RF sweep",
+    [0x24] = "Check temp/humidity",
+    [0x0a] = "MP1: check power state",
+    [0x0d] = "MP1: set port power",
+    [0x09] = "Dooya: curtain command",
+}
+local subcmd_info_labels_classic = {
+    [0x01] = "Read status",
+    [0x02] = "Send IR/RF",
+    [0x03] = "Enter IR learning",
+    [0x04] = "Check captured data",
+    [0x09] = "Dooya: curtain command",
+    [0x0a] = "MP1: check power state",
+    [0x0d] = "MP1: set port power",
+    [0x19] = "Enter RF sweep",
+    [0x1a] = "Check RF frequency",
+    [0x1b] = "Read captured RF data",
+    [0x1e] = "Cancel RF sweep",
+    [0x66] = "Set power state",
+    [0x68] = "Firmware version query",
 }
 
 local day_names = {
@@ -444,7 +478,7 @@ local BroadlinkErrors = {
   [-2] = "Logged in from another device / session invalid",
   [-3] = "Device offline",
   [-4] = "Command not supported",
-  [-5] = "Device storage full / module timeout",
+  [-5] = "Null data",
   [-6] = "Structure abnormal",
   [-7] = "Control key expired",
 }
@@ -657,8 +691,9 @@ local function encrypted(tvb, pktinfo, tree)
         end
     end
 
+    local pchksum_item
     if tvb:len() >= 0x36 then
-        tree:add_le(pf_payload_chksum, tvb(0x34, 2))
+        pchksum_item = tree:add_le(pf_payload_chksum, tvb(0x34, 2))
     end
 
     local pcommand = tvb(0x26, 2):le_uint()
@@ -707,6 +742,21 @@ local function encrypted(tvb, pktinfo, tree)
                     decrypted = ByteArray.new(Struct.tohex(dec_str))
                 end
 
+                -- Validate payload checksum against the decrypted plaintext
+                if pchksum_item then
+                    local stored   = tvb(0x34, 2):le_uint()
+                    local computed = 0xBEAF
+                    for i = 0, decrypted:len() - 1 do
+                        computed = (computed + decrypted:get_index(i)) % 0x10000
+                    end
+                    if stored == computed then
+                        pchksum_item:append_text(" [correct]")
+                    else
+                        pchksum_item:append_text(string.format(" [INCORRECT, expected 0x%04x]", computed))
+                        pchksum_item:add_expert_info(PI_CHECKSUM, PI_WARN, "Bad payload checksum")
+                    end
+                end
+
                 local pt_tvb = ByteArray.tvb(decrypted, "Decrypted Payload")
                 tree:add(pt_tvb(), "Decrypted: " .. decrypted:tohex())
 
@@ -738,11 +788,17 @@ local function encrypted(tvb, pktinfo, tree)
                     local resp_device_id = decrypted(0x00, 4):le_uint()
                     tree:add(pt_tvb(0x00, 0x04), "Device ID: " .. string.format("0x%08x", resp_device_id))
                     local session_key_ba = decrypted(0x04, 0x10)
-                    tree:add(pt_tvb(0x04, 0x10), "Auth Key: " .. session_key_ba:tohex())
+                    tree:add(pf_auth_key, pt_tvb(0x04, 0x10))
                     -- Cache the session key for subsequent command packets from this device
                     local device_ip = tostring(pktinfo.src)
                     if not session_keys[device_ip] then
                         session_keys[device_ip] = session_key_ba
+                        -- Update the preference so the key is visible in
+                        -- Edit → Preferences → Protocols → Broadlink and
+                        -- survives a plugin reload within the same Wireshark session.
+                        broadlink.prefs.aes_key = session_key_ba:tohex()
+                        tree:add(pt_tvb(0x04, 0x10),
+                            "[Session key captured — press Ctrl+Shift+L (Analyze \226\134\146 Reload Lua Plugins) to re-dissect all packets]")
                     end
                 
                 -- Command payload structure (0x006a / 0x03ee):
@@ -779,6 +835,22 @@ local function encrypted(tvb, pktinfo, tree)
 
                     tree:add(pt_tvb(0x00), "Protocol: " .. (is_new and "New" or "Classic"))
 
+                    -- Update Info column: error description takes priority, otherwise subcmd label
+                    do
+                        local err_code = tvb(0x22, 2):le_uint()
+                        if err_code ~= 0 and pcommand == CMD.COMMAND_RESPONSE then
+                            local signed  = err_code >= 0x8000 and err_code - 0x10000 or err_code
+                            local err_str = BroadlinkErrors[signed] or string.format("Error 0x%04x", err_code)
+                            pktinfo.cols.info:append(": " .. err_str)
+                        else
+                            local labels = is_new and subcmd_info_labels_new or subcmd_info_labels_classic
+                            local label  = labels[subcmd]
+                            if label then
+                                pktinfo.cols.info:append(": " .. label)
+                            end
+                        end
+                    end
+
                     if is_new then
                         local payload_length = decrypted(0x00, 2):le_uint()
                         local subcmd_description = get_subcmd_name(dev_type, subcmd) or "Unknown"
@@ -809,6 +881,13 @@ local function encrypted(tvb, pktinfo, tree)
                             local length = decrypted(0, 2):le_uint() - 12
                             local json_str = decrypted(14, length):raw():match("^([^\0]*)")
                             tree:add(pt_tvb(14, length), "JSON: \"" .. (json_str ~= "" and json_str or "(empty)") .. "\"")
+                            -- Use the first JSON key as an Info label
+                            local first_key = json_str:match('"([^"]+)"')
+                            if first_key then
+                                pktinfo.cols.info:set((payload_names[pcommand] or "Command") .. ": JSON (" .. first_key .. ")")
+                            else
+                                pktinfo.cols.info:set((payload_names[pcommand] or "Command") .. ": JSON")
+                            end
                         end
 
                     else -- classic style
@@ -818,8 +897,10 @@ local function encrypted(tvb, pktinfo, tree)
                             tree:add(pt_tvb(0x04, 0x30), "Name: " .. (name_str ~= "" and name_str or "(empty)"))
                             tree:add(pt_tvb(0x43, 0x01), "Locked: " .. (locked_status[decrypted(0x43, 1):le_uint()] or "Unknown") .. string.format(" (0x%02x)", decrypted(0x43, 1):le_uint()))
                             tree:append_text(" (Rename and Lock Device Query)")
+                            pktinfo.cols.info:set((payload_names[pcommand] or "Command") .. ": Rename and Lock Device")
                         elseif subcmd == 0x68 and decrypted_len >= 0x06 then
                             tree:add(pt_tvb(0x00), "Command: Firmware Version Query")
+                            pktinfo.cols.info:set((payload_names[pcommand] or "Command") .. ": Firmware Version Query")
                             if pcommand == CMD.COMMAND_RESPONSE then
                                 tree:add(pt_tvb(0x04, 0x02), "Firmware Version: " .. decrypted(0x04, 0x02):le_uint())
                                 if decrypted_len >= 0x12 then
@@ -873,6 +954,54 @@ local function encrypted(tvb, pktinfo, tree)
             end
         end
     end
+end
+
+local function dissect_json_envelope(tvb, pktinfo, tree)
+    if tvb:len() <= 0x30 then return end
+    local json_tvb  = tvb(0x30)
+    local json_str  = json_tvb:raw():match("^([^\0]*)")
+    if not json_str or json_str == "" then return end
+
+    local t = tree:add(broadlink, json_tvb(), "JSON Envelope Payload")
+    t:add(json_tvb(), "JSON: " .. json_str)
+
+    -- Extract top-level fields with simple pattern matching
+    local function jstr(k) return json_str:match('"' .. k .. '"%s*:%s*"([^"]*)"') end
+    local function jobj(k)
+        local s = json_str:match('"' .. k .. '"%s*:%s*(%b{})')
+        return s
+    end
+
+    local mac = jstr("mac")
+    if mac then t:add(json_tvb(), "MAC: " .. mac) end
+
+    local hdr = jobj("header")
+    if hdr then
+        local ht = t:add(broadlink, json_tvb(), "Header")
+        local function hstr(k) return hdr:match('"' .. k .. '"%s*:%s*"([^"]*)"') end
+        local authcode   = hstr("authcode")
+        local msg_type   = hstr("type")
+        local did        = hstr("did")
+        local pid        = hstr("pid")
+        local devtype    = hstr("devicetype")
+        if msg_type  then ht:add(json_tvb(), "Type: "       .. msg_type)  end
+        if did       then ht:add(json_tvb(), "DID: "        .. did)       end
+        if pid       then ht:add(json_tvb(), "PID: "        .. pid)       end
+        if authcode  then ht:add(json_tvb(), "Auth Code: "  .. authcode)  end
+        if devtype   then
+            local dt_num = tonumber(devtype)
+            local dt_name = dt_num and (get_device_name(dt_num) or string.format("0x%04x", dt_num)) or devtype
+            ht:add(json_tvb(), "Device Type: " .. dt_name)
+        end
+
+        -- Update info column with type label
+        local type_labels = { ["6"] = "Push Notification" }
+        local lbl = msg_type and (type_labels[msg_type] or ("Type " .. msg_type))
+        if lbl then pktinfo.cols.info:append(": " .. lbl) end
+    end
+
+    local body = jstr("body")
+    if body then t:add(json_tvb(), "Body (base64): " .. body) end
 end
 
 local function dissect_join_response(tvb, pktinfo, tree)
@@ -942,6 +1071,8 @@ function broadlink.dissector(tvb, pktinfo, root)
         pktinfo.cols.info:set("Broadlink Join Response")
         tree:append_text(" (AP Mode Setup)")
         dissect_join_response(tvb, pktinfo, tree)
+    elseif payload_type == CMD.JSON_ENVELOPE then
+        dissect_json_envelope(tvb, pktinfo, tree)
     elseif payload_type == CMD.JOIN_ERROR then
         -- Join Response Error: device is already joined
         pktinfo.cols.info:set("Broadlink Response Error")

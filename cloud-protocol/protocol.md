@@ -4,7 +4,7 @@ Next to the regular protocol also another protocol is used (at least with the RM
 
 ## Adapted LAN Protocol
 
-Similar to the [lan-protocl](/lan-protocol/protocol.md) only the data/time fields bytes are used diffrently.
+Similar to the [LAN protocol](/lan-protocol/protocol.md), but the date/time field bytes are used differently.
 
 
 ## Protocol 1812 

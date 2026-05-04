@@ -351,8 +351,8 @@ packet
 100-159: "JSON String ..."
 ```
 
-#### Example JSON 
-When using Device Type: 0x5224 → RM5 Pro, in europ, the BroadLink-app supplid the following localized severs to the Broadlink Device.
+#### Example JSON Request
+JSON Payload send to the device, found when using Device Type: 21028 (`0x5224`) → RM5 Pro, in Europa, the BroadLink-app supplid the following localized severs to the Broadlink Device.
 
 ```
 {
@@ -362,18 +362,7 @@ When using Device Type: 0x5224 → RM5 Pro, in europ, the BroadLink-app supplid 
 }
 ```
 
-88478	2026-04-13 21:08:10.658505	192.168.10.100	192.168.10.1	DNS	85	Standard query 0x2c3f HTTPS 
-
-
-<!-- Other domains found:
-- app-service-deu-81f3c7fd.ibroadlink.com
-- device-heartbeat-deu-6dc239d5.ibroadlink.com
-- device-gateway-deu-6dc239d5.ibroadlink.com
-- device-heartbeat-deu-6dc239d5.ibroadlink.com
-- [app-service-deu-6dc239d5.ibroadlink.com](https://app-service-deu-6dc239d5.ibroadlink.com/appfront/v1/webui/app-h5-help_and_feedback-1209/?language=en-us&nightMode=false&origin=copy&lid=5eda600025ae5057181daaa2124f79b7#)
-- [cloud-oauth-deu-6dc239d5.ibroadlink.com](https://cloud-oauth-deu-6dc239d5.ibroadlink.com/app-h5-oauth-ihc-for-eu-1598/login.html) -->
-
-#### Auth Response Payload (decrypted, from 0x38)
+### Auth Response Payload (decrypted, from 0x38)
 
 | Field                  | Start  | End    | Length   | Value                                                       |
 |------------------------|--------|--------|----------|-------------------------------------------------------------|
@@ -463,8 +452,7 @@ Byte 0x22 of the response contains a little-endian 16 bit error code. If this is
 
 #### Sending IR/RF Data
 
-Send the following `Request` (0x006a) payload:
-
+Send the following `Request` (0x006a) decrypted payload:
 
 |Offset|Contents|
 |------|--------|
@@ -508,12 +496,29 @@ Decrypted: 68000000000000000000000000000000
 Command Code: 0x03ee (Command Response)
 Decrypted: 680000009FF200009FF200000000000030F20000000000000000000000000000
 
+#### Subcommand `0x5a5aa5a5` - Pairing? 
+Found with RM5+ as `Command Response` to payload `{}`, when pairing with the BroadLink-app.
 
-## Apps
+|Offset|Contents|
+|---------|--------|
+|0x00-0x01| Inner Length |
+|0x02-0x05| Subcommand = 0x5a5aa5a5 |
+|0x06-0x09| Unknown... | 
+|0x10-0x13| JSON Length | 
+|0x10-0x13| JSON | 
 
-### iOS/iPadOS
+Request: 
+```{}```
 
-- e-Control: Seems not the be compatible with RM devices. It's using port 15000 for WiFi pairing message with the credentials, also package stucture differs.
-- Broadlink: Uses Bluetooth to transfer WiFi credentials.
-- NoApp: Unclear as login is required, does send out Hello Request's (Command Code: 0x0006).
-- ihc for EU: Unclear as login is required, does send out Hello Request's (Command Code: 0x0006).
+Response:
+```
+{
+   "serverlist":[
+      {
+         "host":"device-heartbeat-deu-6dc239d5.ibroadlink.com",
+         "ip":"0.0.0.0"
+      }
+   ]
+}
+```
+
